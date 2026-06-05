@@ -1,0 +1,33 @@
+{
+  "created_at": "2026-06-05T09:30:22Z",
+  "gold_v1_sha256": "9d8f7dc302c484dc4317d6ec5d93019c7e5f655f009a8459e8ff0d84cc648efa",
+  "total_pairs": 1002,
+  "hand_validated": false,
+  "provenance": "AUTO-PROMOTED from tier-7B splits (HIGH + bidirectional-consistent MED + rag-concurs MED); ZERO hand-validation (provisional M2 freeze). 134 HIGH+inconsistent rows ship unreviewed — see development_plan.md M2.",
+  "splits": {
+    "train": {
+      "input_rows": 778,
+      "emitted": 773,
+      "target_from_registry": 657,
+      "target_from_ensemble_summary": 116,
+      "excluded_non_registry": 5,
+      "excluded_no_target_text": 0
+    },
+    "val": {
+      "input_rows": 79,
+      "emitted": 79,
+      "target_from_registry": 71,
+      "target_from_ensemble_summary": 8,
+      "excluded_non_registry": 0,
+      "excluded_no_target_text": 0
+    },
+    "test": {
+      "input_rows": 150,
+      "emitted": 150,
+      "target_from_registry": 131,
+      "target_from_ensemble_summary": 19,
+      "excluded_non_registry": 0,
+      "excluded_no_target_text": 0
+    }
+  }
+}
