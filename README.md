@@ -34,9 +34,9 @@ D'accord ("agreed" in French) is a small specialized language model fine-tuned t
 |---|---|
 | `data/ingest/` | PDF → markdown via Marker (locked for both EN and TH; Thai bake-off result: marker recall=1.0 precision=1.0 reading-order=5.0 vs typhoon reading-order=4.0 — see [data/parser_bakeoff/summary.md](data/parser_bakeoff/summary.md)) |
 | `data/registry/` | Per-framework valid citation IDs extracted from parsed markdown — deterministic key for ensemble filtering |
-| `data/ensemble/` | Multi-model candidate generation — four open-weight models via free-tier APIs (Llama 4 Scout via Groq, Qwen 3-32B via Groq/Cerebras, Gemini 3.1 Flash Lite via Google AI Studio, DeepSeek V3); chain-of-thought JSON output; citation IDs constrained to registry |
-| `data/tiering/` | HIGH/MEDIUM/LOW/SALVAGE classification (deterministic via registry agreement) |
-| `data/gold/` | Hand-validated mapping pairs (target 500–1000) — committed |
+| `data/ensemble/` | Multi-model candidate generation — 4 paid-API seats (Claude Haiku 4.5, GPT-5-mini, Gemini 3.1 Flash Lite, Qwen 3-235B via Together) + a 5th CPU RAG seat; chain-of-thought JSON output; citation IDs constrained to registry. Subtree map in [data/README.md](data/README.md) |
+| `data/ensemble/tiered/` | HIGH/MEDIUM/LOW/SALVAGE classification (deterministic via registry agreement) + bidirectional reverse-direction cross-check |
+| `data/gold/` | Frozen mapping pairs (`gold_v1.jsonl`, 1,002) — committed. **Provisional: auto-promoted, zero hand-validation** |
 | `training/` | QLoRA training (Qwen3-8B base) + MLflow autolog |
 | `eval/` | Three-tier scoring (citation exact match + LLM-as-judge semantic + ~100-example human spot-check) across four comparators including a retrieval baseline; stratified by in-domain vs out-of-domain ([eval/README.md](eval/README.md)) |
 | `publish/` | S3 packaging in SageMaker-compatible layout — bundles QLoRA adapter + retrieval index + embedder snapshot + custom inference handler |
@@ -48,13 +48,9 @@ D'accord ("agreed" in French) is a small specialized language model fine-tuned t
 **Dataset construction (~50% of effort)**:
 1. **Seed from public crosswalks** — NIST 800-53 ↔ ISO 27001 (published by NIST, free) as authoritative anchors.
 2. **Citation registry extraction** — per-framework structured TOC of valid section/article IDs from parsed markdown. Avoids the "LLM says `GDPR Art. 32` but Marker emitted `### 32. Security of processing`" mismatch under naive substring matching.
-3. **Multi-model ensemble with constrained citations + chain-of-thought** — each model emits `{source_mechanism, target_mechanism, mapping_justification, citation_id}` with citation_id restricted to the target framework's registry. Four diverse open-weight models served via free-tier APIs: Llama 4 Scout (Groq), Qwen 3-32B (Groq / Cerebras), Gemini 3.1 Flash Lite (Google AI Studio), DeepSeek V3.
-4. **Tier classification**:
-   - **HIGH** (4/4 agree on citation_id): train set without per-pair labeling; sample 10% for quality audit
-   - **MEDIUM** (3/4 agree OR target section consensus with sub-clause disagreement): hand-validate 100%
-   - **LOW** (≤2/4 agree): hand-validate 100% → eval set seed (hardest cases)
-   - **SALVAGE**: chain-of-thought reads correct but citation_id wrong → manual correct → promote to train
-5. **Stratified human spot-check on HIGH-tier per jurisdiction** — catches systematic ensemble bias (real risk for under-represented SEA regs where all four models may share the same blind spots).
+3. **Multi-model ensemble with constrained citations + chain-of-thought** — each model emits `{source_mechanism, target_mechanism, mapping_justification, citation_id}` with citation_id restricted to the target framework's registry. Four diverse paid-API seats, one per family (Anthropic Claude Haiku 4.5 / OpenAI GPT-5-mini / Google Gemini 3.1 Flash Lite / Alibaba Qwen 3-235B via Together), plus an independent 5th CPU **RAG seat** (MPNet + FAISS over target clauses).
+4. **Tier classification** — HIGH (4/4 agree), MEDIUM (≥60%), LOW (<60%), SALVAGE (no valid votes), plus a bidirectional reverse-direction cross-check and the RAG seat as independent corroboration signals.
+5. **Gold promotion** — designed for human hand-validation of MED/LOW/SALVAGE with a 10% HIGH spot-check. **As executed for M2, gold was frozen provisionally from auto-promotion only (HIGH + bidirectional-consistent MED + rag-concurs MED), ZERO hand-validation** — reversible because raw data is immutable; hand-validation revisited via the tier-7C labeler if M3/M4 quality bites.
 
 **Training**: QLoRA on Qwen3-8B, MLflow-tracked, local on RTX 5080 (16GB VRAM is sufficient for 8B QLoRA at 4-bit NF4).
 
@@ -88,7 +84,10 @@ Phase 1 (local validation) in progress. Phase 2 (SageMaker hosting) triggered se
   - ✓ R8 PASS: browser-print PDFs (UK-GDPR, UK DPA 2018, FR Loi I+L) hit **1.29× the regulator-baseline citation density** — no R8 fallback needed. Report at [data/ingest/r8_spotcheck.txt](data/ingest/r8_spotcheck.txt).
   - ✓ Per-framework citation-registry extraction (tier 5): 9/9 frameworks extracted from the parsed markdown, **100% toy-gold base-section recall** on every framework. Registries at [data/registry/](data/registry/) (gdpr 92, uk_gdpr 103, dpa_2018 288, bdsg 97, loi_il 126, pdpa_sg 91, pdpa_th 96, pdpa_my 146, dpa_2012_ph 72 citation IDs). R8 follow-up resolved: PDPA-MY Malay regex (`Seksyen`) catches what the EN-only baseline missed.
 
-- **M2 — Gold set frozen** ⏳ — active (unblocked 2026-05-26). Target ≥500 hand-validated pairs via 4-model ensemble (Llama 4 Scout / Qwen 3-32B / Gemini 3.1 Flash Lite / DeepSeek V3) + tiering script + jurisdiction-disjoint train/val/test split.
+- **M2 — Gold set frozen (✓ provisional, 2026-06-05)**
+  - ✓ Ensemble generated via **Path 2 paid direct API** (Claude Haiku 4.5 / GPT-5-mini / Gemini 3.1 Flash Lite / Qwen 3-235B via Together) + a 5th CPU **RAG seat** — 35,552 raw candidates, 99.955% success, ~$32. Tiered to 8,888 rows (HIGH 840 / MED 1,113 / LOW 6,633 / SALVAGE 302) + bidirectional reverse-direction cross-check.
+  - ✓ Gold frozen at **1,002 pairs** (2× the ≥500 floor) — jurisdiction-disjoint splits (test={th,ph}, val={my}) committed at [data/gold/](data/gold/) with dataset SHA in `gold_v1_manifest.json`.
+  - ⚠ **Provisional — ZERO hand-validation.** Gold is auto-promotion only (HIGH + bidirectional-consistent MED + rag-concurs MED); 134 HIGH+inconsistent rows ship unreviewed. Reversible (raw data immutable); revisit via the tier-7C labeler if M3/M4 quality bites. See [development_plan.md](docs/development_plan.md) M2.
 - **M3 — Small-sweep validated** ⏳ — blocked on M2. 1 epoch × 200 pairs end-to-end, adapter saves/reloads cleanly, MLflow autolog with adapter SHA.
 - **M4 — Eval delta proven (Phase 1 done)** ⏳ — blocked on M3. Three-tier eval × 4 comparators × 2 slices (in-domain + out-of-domain) per-jurisdiction breakdown.
 
@@ -146,7 +145,7 @@ Per-env Python split: root/eval/audit/baseline/consumer on 3.14; bakeoff on 3.13
 | **3A (M0)** | 2026-05-25 | 4 baseline comparators on toy gold judged by Llama 4 Scout; `envs/baseline/` + `LocalHFClient` + `GroqJudge` shipped; Qwen3-8B locked as QLoRA base |
 | **4 (M1)** | 2026-05-26 | 13-PDF corpus parsed to markdown via Marker; `envs/ingest/` + 7th compose service; surya weights cached + `hf_transfer` (~65× download speedup); R8 PASS at 1.29× regulator-baseline citation density |
 | **5 (M1)** | 2026-05-26 | Per-framework citation-registry extraction — 9/9 frameworks, 100% toy-gold base-section recall, idempotent reruns; closes M1 |
-| **6–9 (M2)** | TBD | Ensemble generation + tiering + gold freeze (≥500 pairs) + jurisdiction-disjoint splits |
+| **6–9 (M2)** | 2026-06-05 | Path-2 paid ensemble + RAG seat (35,552 candidates) → tiering + bidirectional → **provisional gold freeze 1,002 pairs (zero hand-val)** + jurisdiction-disjoint splits + dataset SHA |
 | **10–11 (M3)** | TBD | Training scaffold + small-sweep (1 epoch × 200 pairs) |
 | **12–13 (M4)** | TBD | Full QLoRA train + three-tier eval × 4 comparators × 2 slices — Phase 1 done |
 | **14–18 (M5)** | TBD (Phase 2) | SageMaker endpoint stand-up via boto3 + smoke test + capture + teardown |
