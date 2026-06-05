@@ -277,7 +277,7 @@ Sections 2–4 describe sequencing at the tier-row granularity. This section zoo
 | 7A ensemble label generation (Path 2 paid API) | ✓ Done (2026-05-27) — `EnsembleStrategy` Protocol at [src/daccord/ensemble/strategy.py](../src/daccord/ensemble/strategy.py); `PaidAPIStrategy` (Claude Haiku 4.5 + GPT-5-mini + Gemini 3.1 Flash Lite + Qwen 3-235B via Together); `run-paid` CLI at [scripts/run_ensemble.py](../scripts/run_ensemble.py); resilient JSONL with `ImmutabilityViolation` guards (3 sanctioned writers); **35,552 raw candidates** at **99.955% success** across 72 framework-pairs × 4 seats; 16 deterministic context-overflow parse_errors on `dpa_2018-215`; **~$32 total, ~6.5 h wall-clock**. Path 1 (Bedrock batch) preserved as `BedrockBatchStrategy` + `BedrockSyncStrategy` at [src/daccord/ensemble/strategies/bedrock.py](../src/daccord/ensemble/strategies/bedrock.py) but unused. | See §9.9 + [docs/tier7_handoff.md](tier7_handoff.md) + [docs/7a_path.md](7a_path.md) |
 | 7B jurisdiction-disjoint splits | ✓ Done (2026-05-28; extended 2026-05-29) — `scripts/build_splits.py` + library at [src/daccord/ensemble/splits.py](../src/daccord/ensemble/splits.py); `--promote-bidirectional-consistent` + (NEW) `--promote-rag-concurs` flags auto-include MED rows confirmed by each independent signal; per-pair `(forward_pair, source_id)` composite key prevents cross-pair leakage; SHA256 manifest covering tiered + validated + bidirectional inputs; **19 tests pass**; HIGH-only=**840**, +bidirectional=**927**, +RAG=**940**, **+both=1,007** | See §9.9 |
 | 7C UI labeler (Streamlit) | ✓ Done (2026-05-28) — bidirectional-aware reviewer at [consumer/labeler/app.py](../consumer/labeler/app.py); queue plumbing at [consumer/labeler/queue.py](../consumer/labeler/queue.py); validated overlay writer at [src/daccord/ensemble/validated.py](../src/daccord/ensemble/validated.py) (same write-once-per-source_id `ImmutabilityViolation` contract as raw); **16 tests pass** (9 queue + 7 overlay); default filters skip auto-promotable `consistent` and surface `inconsistent` first | See §9.9 |
-| 8 + 9 hand-val + gold freeze | ⏳ Pending — operator runs labeler against **134 HIGH+inconsistent + 243 MED+inconsistent** priority queue (now with RAG as a 3rd signal in the labeler UI); tier 9 freeze to `data/gold/gold_v1.jsonl` with dataset SHA in MLflow per M2 DoD. **Post-RAG gold pool 1,007** (HIGH + bidirectional-MED + rag_concurs-MED, zero hand-val), 2× the dev-plan ≥500 floor. | See [docs/tier7_handoff.md](tier7_handoff.md) |
+| 8 + 9 gold freeze | ✓ Done (provisional, 2026-06-05) — **ZERO hand-validation** (tier 8 deferred; `data/ensemble/validated/` empty). Gold frozen from auto-promotion only via `scripts/freeze_gold.py` ([src/daccord/gold/freeze.py](../src/daccord/gold/freeze.py)): HIGH + bidirectional-consistent MED + rag_concurs MED → **1,002 pairs** in `data/gold/gold_v1.jsonl` (+ trainer-ready `{train,val,test}.jsonl`) with dataset SHA in `gold_v1_manifest.json`. **⚠ Provisional:** the 134 HIGH+inconsistent rows ship unreviewed; revisit trigger below. | See ⚠ note in §9.9 |
 
 ### 9.1 — Tier 1 detail (what landed + 1C closure plan)
 
@@ -967,10 +967,31 @@ Suggested operator workflow for next session (per [docs/tier7_handoff.md](tier7_
 3. **Hand-val the 243 MED+inconsistent rows** for the next gold expansion.
 4. **Don't bother with LOW or reverse_unknown** unless time allows — signal-to-noise too poor.
 
-**Pending — Tier 8 + Tier 9 (operator hand-val + gold freeze):**
+**⚠ Tier 8 + Tier 9 — DONE PROVISIONALLY, ZERO HAND-VALIDATION (2026-06-05):**
 
-- **Tier 8** — after the operator runs the labeler, re-run splits with the updated validated overlay to include hand-validated MEDs alongside the auto-promoted ones.
-- **Tier 9** — final filter (HIGH + validated/auto-promoted MED) → `data/gold/gold_v1.jsonl`. Currently sitting at **927 with zero hand-val** thanks to bidirectional promotion (the ≥500 dev-plan floor is comfortably cleared). Dataset SHA + jurisdiction-disjoint splits to MLflow per dev-plan M2 DoD.
+The operator decision was to **freeze gold from auto-promotion only and skip human review entirely for now**,
+because the raw ensemble data is immutable so the choice is fully reversible. The reasoning: once MED is
+auto-promoted unvalidated (a weaker signal), a 10% HIGH spot-check is incoherent — auditing the strongest tier
+while rubber-stamping a weaker one. So **no labeler pass was run**; `data/ensemble/validated/` is empty.
+
+- **Tier 8 (hand-val)** — **deferred.** A literal "100% hand-validate MED/LOW/SALVAGE" = 8,048 rows by hand
+  (LOW alone is 6,633 = 75% of tiered rows); infeasible solo and unnecessary for the ≥500 M2 floor.
+- **Tier 9 (freeze)** — `scripts/freeze_gold.py` projects the tier-7B splits (`TieredPair`) into the canonical
+  `GoldPair` shape ([src/daccord/gold/freeze.py](../src/daccord/gold/freeze.py)), resolving `target_mechanism`
+  from `data/clauses/` (registry body, with a consensus-vote-summary fallback for body-recall misses) and
+  `{src,tgt}_language` from [src/daccord/gold/languages.py](../src/daccord/gold/languages.py). Output:
+  **1,002 pairs** in `data/gold/gold_v1.jsonl` (859 registry-text + 143 vote-summary; 5 excluded for citing a
+  non-registry id) + trainer-ready `data/gold/{train,val,test}.jsonl` + `gold_v1_manifest.json` (dataset SHA).
+  Every row's `notes` says `NOT hand-validated`.
+
+**🔴 Known-risk pocket carried into gold:** HIGH is auto-eligible regardless of bidirectional status, so the
+**134 HIGH+inconsistent** rows (forward agreement high, reverse direction disagrees) are in gold **unreviewed**.
+MED+inconsistent rows are *not* promoted (safely excluded), so they carry no risk.
+
+**↩ Revisit trigger** — return to tier-8 hand-validation (via the existing labeler
+[consumer/labeler/app.py](../consumer/labeler/app.py), filtered to tier=HIGH + bidirectional=inconsistent for
+the 134-row pocket) **if** M3 training is unstable **or** M4 citation-match is below baseline. The labeler's
+`validated/` overlay feeds straight back into `build_splits.py`; re-running `freeze_gold.py` regenerates gold.
 
 **Verification (all green this MR):**
 

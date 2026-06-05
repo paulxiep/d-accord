@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Literal
 
 from daccord.costs import preflight, record_call
+from daccord.gold.languages import FRAMEWORK_TO_JURISDICTION, FRAMEWORK_TO_LANGUAGE
 from daccord.gold.schema import GoldPair
 from daccord.validation import validated
 
@@ -50,30 +51,8 @@ FRAMEWORKS: tuple[str, ...] = (
     "pdpa_my",
 )
 JURISDICTIONS: tuple[str, ...] = ("eu", "uk", "de", "fr", "sg", "th", "ph", "my")
-FRAMEWORK_TO_JURISDICTION: dict[str, str] = {
-    "gdpr": "eu",
-    "uk_gdpr": "uk",
-    "dpa_2018": "uk",
-    "bdsg": "de",
-    "loi_il": "fr",
-    "pdpa_sg": "sg",
-    "pdpa_th": "th",
-    "dpa_2012_ph": "ph",
-    "pdpa_my": "my",
-}
-# Per-framework primary citation-text language (ISO 639-1).
-# pdpa_th/bdsg/loi_il can also be cited in English translations — drafter picks per-pair.
-FRAMEWORK_TO_LANGUAGE: dict[str, str] = {
-    "gdpr": "en",
-    "uk_gdpr": "en",
-    "dpa_2018": "en",
-    "bdsg": "de",
-    "loi_il": "fr",
-    "pdpa_sg": "en",
-    "pdpa_th": "th",
-    "dpa_2012_ph": "en",
-    "pdpa_my": "en",
-}
+# FRAMEWORK_TO_JURISDICTION / FRAMEWORK_TO_LANGUAGE moved to
+# daccord.gold.languages (shared with the tier-9 gold freeze); imported above.
 CONCEPT_AXES: tuple[str, ...] = (
     "consent / lawful basis for processing",
     "data subject access rights",
