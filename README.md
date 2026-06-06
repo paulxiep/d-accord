@@ -37,7 +37,7 @@ D'accord ("agreed" in French) is a small specialized language model fine-tuned t
 | `data/ensemble/` | Multi-model candidate generation — 4 paid-API seats (Claude Haiku 4.5, GPT-5-mini, Gemini 3.1 Flash Lite, Qwen 3-235B via Together) + a 5th CPU RAG seat; chain-of-thought JSON output; citation IDs constrained to registry. Subtree map in [data/README.md](data/README.md) |
 | `data/ensemble/tiered/` | HIGH/MEDIUM/LOW/SALVAGE classification (deterministic via registry agreement) + bidirectional reverse-direction cross-check |
 | `data/gold/` | Frozen mapping pairs (`gold_v1.jsonl`, 1,002) — committed. **Provisional: auto-promoted, zero hand-validation** |
-| `training/` | QLoRA training (Qwen3-8B base) + MLflow autolog |
+| `training/` | QLoRA training (Qwen3-8B base, 4-bit NF4, all-linear LoRA) — MLflow-tracked via `report_to=["mlflow"]`; 1–2 sentence summary target (full clause body served via retrieval) |
 | `eval/` | Three-tier scoring (citation exact match + LLM-as-judge semantic + ~100-example human spot-check) across four comparators including a retrieval baseline; stratified by in-domain vs out-of-domain ([eval/README.md](eval/README.md)) |
 | `publish/` | S3 packaging in SageMaker-compatible layout — bundles QLoRA adapter + retrieval index + embedder snapshot + custom inference handler |
 | `src/daccord/serving/` | `HybridRouter` (retrieval-first, QLoRA fallback, per-response provenance tagging) shared between local demo and SageMaker handler |
@@ -52,7 +52,7 @@ D'accord ("agreed" in French) is a small specialized language model fine-tuned t
 4. **Tier classification** — HIGH (4/4 agree), MEDIUM (≥60%), LOW (<60%), SALVAGE (no valid votes), plus a bidirectional reverse-direction cross-check and the RAG seat as independent corroboration signals.
 5. **Gold promotion** — designed for human hand-validation of MED/LOW/SALVAGE with a 10% HIGH spot-check. **As executed for M2, gold was frozen provisionally from auto-promotion only (HIGH + bidirectional-consistent MED + rag-concurs MED), ZERO hand-validation** — reversible because raw data is immutable; hand-validation revisited via the tier-7C labeler if M3/M4 quality bites.
 
-**Training**: QLoRA on Qwen3-8B, MLflow-tracked, local on RTX 5080 (16GB VRAM is sufficient for 8B QLoRA at 4-bit NF4).
+**Training**: QLoRA on Qwen3-8B, 4-bit NF4, all-linear LoRA, MLflow-tracked, local on RTX 5080. The M3 small-run validated the pipeline (200 × 1 epoch); the trainer targets a 1–2 sentence mechanism summary (full clause text is served via the retrieval path), which keeps sequences within 16 GB VRAM at micro-batch 1.
 
 **Eval** — three-tier scoring across four comparator models:
 - **Tier 1 — Citation exact match**: deterministic, cheap; top-1 and top-3.
@@ -88,7 +88,11 @@ Phase 1 (local validation) in progress. Phase 2 (SageMaker hosting) triggered se
   - ✓ Ensemble generated via **Path 2 paid direct API** (Claude Haiku 4.5 / GPT-5-mini / Gemini 3.1 Flash Lite / Qwen 3-235B via Together) + a 5th CPU **RAG seat** — 35,552 raw candidates, 99.955% success, ~$32. Tiered to 8,888 rows (HIGH 840 / MED 1,113 / LOW 6,633 / SALVAGE 302) + bidirectional reverse-direction cross-check.
   - ✓ Gold frozen at **1,002 pairs** (2× the ≥500 floor) — jurisdiction-disjoint splits (test={th,ph}, val={my}) committed at [data/gold/](data/gold/) with dataset SHA in `gold_v1_manifest.json`.
   - ⚠ **Provisional — ZERO hand-validation.** Gold is auto-promotion only (HIGH + bidirectional-consistent MED + rag-concurs MED); 134 HIGH+inconsistent rows ship unreviewed. Reversible (raw data immutable); revisit via the tier-7C labeler if M3/M4 quality bites. See [development_plan.md](docs/development_plan.md) M2.
-- **M3 — Small-sweep validated** ⏳ — blocked on M2. 1 epoch × 200 pairs end-to-end, adapter saves/reloads cleanly, MLflow autolog with adapter SHA.
+- **M3 — Small-run validated (✓ 2026-06-06)**
+  - ✓ Tier 10A `training/` sub-project (QLoRA on Qwen3-8B, 4-bit NF4, all-linear LoRA) + `scripts/build_training_data.py` + `training` compose service. MLflow via `report_to=["mlflow"]` (not global autolog).
+  - ✓ Small-run 200 × 1 epoch, ~10 min — train loss 1.306→0.862, eval_loss 0.967→0.963; adapter (87 MB) reloads via `LocalAdapterClient` + emits coherent mappings; MLflow logs git_commit·seed·dataset_hash·adapter_sha256 (sha verified == on-disk file).
+  - **Training target = ensemble 1–2 sentence summary** (the full clause body is served via the retrieval path instead) — aligns train with the eval prompt and keeps sequences within 16 GB VRAM.
+  - **R5 finding**: on 16 GB Windows/WSL the 5080 *silently spills* to system RAM at seq-4096 × micro-batch 2 (NVIDIA sysmem fallback — no clean CUDA OOM, just a crawl); watch step-time/shared-memory, not an exception. Resolved at micro-batch 1 + the summary target. Qwen3 `<think>`-block parser fix also landed (else M4 would score every fine-tune row as a parse error).
 - **M4 — Eval delta proven (Phase 1 done)** ⏳ — blocked on M3. Three-tier eval × 4 comparators × 2 slices (in-domain + out-of-domain) per-jurisdiction breakdown.
 
 ### Phase 2 — SageMaker hosting
@@ -146,7 +150,7 @@ Per-env Python split: root/eval/audit/baseline/consumer on 3.14; bakeoff on 3.13
 | **4 (M1)** | 2026-05-26 | 13-PDF corpus parsed to markdown via Marker; `envs/ingest/` + 7th compose service; surya weights cached + `hf_transfer` (~65× download speedup); R8 PASS at 1.29× regulator-baseline citation density |
 | **5 (M1)** | 2026-05-26 | Per-framework citation-registry extraction — 9/9 frameworks, 100% toy-gold base-section recall, idempotent reruns; closes M1 |
 | **6–9 (M2)** | 2026-06-05 | Path-2 paid ensemble + RAG seat (35,552 candidates) → tiering + bidirectional → **provisional gold freeze 1,002 pairs (zero hand-val)** + jurisdiction-disjoint splits + dataset SHA |
-| **10–11 (M3)** | TBD | Training scaffold + small-sweep (1 epoch × 200 pairs) |
+| **10–11 (M3)** | 2026-06-06 | `training/` QLoRA sub-project + summary-target build; small-run (200×1ep) validated — loss curve sane, adapter saves/reloads, MLflow SHA-linked; R5 sysmem-spill + Qwen3 `<think>` parser fixes |
 | **12–13 (M4)** | TBD | Full QLoRA train + three-tier eval × 4 comparators × 2 slices — Phase 1 done |
 | **14–18 (M5)** | TBD (Phase 2) | SageMaker endpoint stand-up via boto3 + smoke test + capture + teardown |
 
@@ -162,7 +166,7 @@ Per-env Python split: root/eval/audit/baseline/consumer on 3.14; bakeoff on 3.13
 
 - **Browser-print PDFs for UK + FR**: UK-GDPR, UK DPA 2018, and FR Loi Informatique et Libertés have no scraper-friendly consolidated PDFs (legislation.gov.uk and Légifrance expose only HTML). The corpus falls back to browser print-to-PDF for these three sources — 5–60× larger files with embedded page chrome. Risk R8 in the development plan; tier-4 spot-check **PASS** at 1.29× regulator-baseline citation density (report at [data/ingest/r8_spotcheck.txt](data/ingest/r8_spotcheck.txt)).
 - **Gemini free-tier daily cap**: `gemini-3.1-flash-lite` ships 15 RPM / 500 RPD on the free tier. The earlier `gemini-2.5-flash` daily cap was as low as 20 RPD on some accounts, which exhausted mid-baseline; the project standardised on 3.1 Flash Lite and the Llama 4 Scout judge sidesteps any per-minute spikes via the 10-RPM global throttle + transient-error retry layer + pair-major iteration (per-provider density stays at ~1 call per pair-cycle, well under any single provider's cap).
-- **No `envs/training/` env yet**: tier 10A (QLoRA training script) will add a 7th compose service. RTX 5080 (16 GB VRAM) is sufficient for 7B QLoRA but a small-sweep at M3 will validate OOM headroom; Unsloth fallback documented in the dev plan if VRAM is tight at full `max_seq_len`.
+- **16 GB VRAM is tight for 8B QLoRA at long sequences**: the M3 small-run validated training end-to-end, but seq-4096 × micro-batch 2 *silently spills* to system RAM on Windows/WSL (the NVIDIA driver's sysmem fallback — no clean CUDA OOM, just a slowdown). The working config is **micro-batch 1** with a **1–2 sentence summary target** (the full registry clause bodies hit ~22 K tokens and overflowed VRAM; full text is served via retrieval instead). Unsloth remains the documented fallback if the 12A full train needs more headroom.
 
 ---
 

@@ -9,6 +9,7 @@
 #   - baseline  → envs/baseline/(tier 3A Qwen2.5-7B 4-bit-NF4 baseline; GPU service)
 #   - ingest    → envs/ingest/  (tier 4 full-corpus PDF→markdown via Marker; GPU service)
 #   - consumer  → consumer/     (Streamlit side-by-side; lands at tier 12C)
+#   - training  → training/     (tier 10A/11 QLoRA small-run + 12A full train; GPU service)
 #
 # Volume strategy:
 #   - Project source: bind-mounted from Windows host at /workspace.
@@ -225,6 +226,41 @@ services:
     tty: true
     stdin_open: true
 
+  training:
+    # Tier 10A/11 — QLoRA small-run (the M3 gate), reused for the tier-12A full
+    # train. Same CUDA image as baseline (Python 3.14). Build the training data
+    # in the lightweight root service first, then run the trainer here:
+    #   docker compose run --rm root uv run python scripts/build_training_data.py
+    #   docker compose run --rm training uv sync
+    #   docker compose run --rm training uv run python train.py
+    # See docs/m3_gate.md for the OOM ladder + gate-close checks.
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - .:/workspace
+      - daccord-uv-cache:/root/.cache/uv
+      - daccord-hf-cache:/root/.cache/huggingface
+      - daccord-venv-training:/workspace/training/.venv
+    working_dir: /workspace/training
+    # Pin MLflow to the repo-root store so runs land in one place regardless of
+    # the /workspace/training CWD (file:./mlruns would otherwise nest under it).
+    # MLFLOW_ALLOW_FILE_STORE: newer MLflow 3.x puts the file backend in
+    # "maintenance mode" and errors without this opt-out. Phase 1 is file-store
+    # by design (docs/MLFLOW.md); the SQLite migration is a Phase-2 concern.
+    environment:
+      MLFLOW_TRACKING_URI: "file:/workspace/mlruns"
+      MLFLOW_ALLOW_FILE_STORE: "true"
+    tty: true
+    stdin_open: true
+
 volumes:
   daccord-uv-cache:
   daccord-hf-cache:
@@ -239,3 +275,4 @@ volumes:
   daccord-venv-baseline:
   daccord-venv-ingest:
   daccord-venv-consumer:
+  daccord-venv-training:
