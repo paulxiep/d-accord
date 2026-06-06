@@ -162,9 +162,10 @@ All ML substance happens here. AWS account stood up at M2 (tier 6C, pulling 14A/
 
 ### M3 — Small-Sweep Validated (~d10)
 
-- **DoD**: 1 epoch × 200 pairs trains end-to-end · loss curve sensible · adapter saves+reloads cleanly · MLflow autolog shows the run with adapter SHA logged
-- **Artifact**: MLflow screenshot + sanity-check inference output
+- **DoD**: 1 epoch × 200 pairs trains end-to-end · loss curve sensible · adapter saves+reloads cleanly · MLflow run shows the run with adapter SHA logged (via `report_to=["mlflow"]` + the project's `log_*` helpers — **not** global autolog; see [MLFLOW.md](MLFLOW.md))
+- **Artifact**: MLflow run (train + eval loss curves) + sanity-check inference output (`training/runs/<run>/sanity.jsonl`)
 - **Cut criterion**: OOM at QLoRA-7B on the 5080 → drop max_seq_len 4096→2048, add gradient checkpointing, micro-batch 1 + grad-accum 16. If still OOM, **swap to Unsloth** before full train.
+- **Detailed execution plan**: [docs/m3_gate.md](m3_gate.md) — resolved hyperparameter config (tier 10B), training-data build (3-field completions joined from `data/ensemble/tiered/`), completion-only loss masking, loss-curve acceptance criteria, and the full OOM ladder. ("small-sweep" is a misnomer carried from the original plan — M3 is a single smoke **run**; the actual hyperparameter sweep is 12A.)
 
 ### M4 — Eval Delta Proven (~d12) — Phase 1 done
 
