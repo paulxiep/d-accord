@@ -50,6 +50,18 @@ mlartifacts/
 /data/ensemble/
 /data/tiering/
 /data/splits/
+# Regenerable derivatives — gitignored to keep history lean; CHEAPLY rebuilt from
+# committed inputs (data/registry/ + data/ingest/) via committed scripts. See
+# data/README.md "Regenerating the gitignored derivatives" for commands:
+#   data/clauses/ ← scripts/extract_clauses.py            (byte-identical; CPU)
+#   data/indices/ ← envs/eval/scripts/build_target_indices.py  (FAISS; CPU)
+/data/clauses/
+/data/indices/
+# NOTE: data/training/ is intentionally COMMITTED (not ignored). It's the small
+# (~4 MB) distilled trainer input (summary target); its upstream
+# data/ensemble/tiered/ (84 MB) is gitignored + ~$32 to rebuild, so committing the
+# distillate keeps training reproducible on a fresh clone and version-controls the
+# MLflow dataset_hash. data/gold/ is committed for the same reason.
 /data/gold/snapshots/
 # Gold drafter intermediate outputs (LLM proposals before human reconcile/verify)
 /data/gold/*.draft_*.jsonl

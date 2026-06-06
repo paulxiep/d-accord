@@ -49,8 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     tiered_index = load_tiered_index(args.tiered_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    grand_rows = 0
-    grand_vote = 0
+    grand_rows = grand_mech = grand_just = 0
     for name in SPLIT_NAMES:
         gold_path = args.gold_dir / f"{name}.jsonl"
         if not gold_path.exists():
@@ -58,22 +57,25 @@ def main(argv: list[str] | None = None) -> int:
         gold_set = GoldSet.from_jsonl(gold_path)
         examples, stats = build_training_examples(gold_set, tiered_index)
         log.info(
-            "%-5s  rows=%4d  justification: from_vote=%4d  missing=%4d  (%.0f%% covered)",
+            "%-5s  rows=%4d  mechanism: vote=%4d fallback=%4d  justification: vote=%4d missing=%4d",
             name,
             stats.input_rows,
+            stats.mechanism_from_vote,
+            stats.mechanism_fallback,
             stats.justification_from_vote,
             stats.justification_missing,
-            100.0 * stats.justification_from_vote / max(stats.input_rows, 1),
         )
         grand_rows += stats.input_rows
-        grand_vote += stats.justification_from_vote
+        grand_mech += stats.mechanism_from_vote
+        grand_just += stats.justification_from_vote
         if not args.dry_run:
             _write(args.out_dir / f"{name}.jsonl", examples)
 
     log.info(
-        "TOTAL rows=%d  justification coverage=%.1f%%",
+        "TOTAL rows=%d  summary-target coverage=%.1f%%  justification coverage=%.1f%%",
         grand_rows,
-        100.0 * grand_vote / max(grand_rows, 1),
+        100.0 * grand_mech / max(grand_rows, 1),
+        100.0 * grand_just / max(grand_rows, 1),
     )
     if args.dry_run:
         log.info("--dry-run: no files written")

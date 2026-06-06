@@ -1,8 +1,9 @@
 """Tier-10A training-data build tests — the gold → SFT-example projection.
 
-Covers the join that recovers `mapping_justification` from the consensus
-ensemble vote, the 3-field completion shape, and graceful handling when no
-tiered match exists. See `daccord.gold.training_data` + [docs/m3_gate.md].
+Covers the joins that recover `target_mechanism` (the 1-2 sentence summary) and
+`mapping_justification` from the consensus ensemble vote, the 3-field completion
+shape, and graceful fallback to the gold body when no vote summary exists.
+See `daccord.gold.training_data` + [docs/m3_gate.md].
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ from daccord.gold.training_data import (
     source_id_of,
 )
 
+# Distinct strings so tests can tell which source a field came from.
+GOLD_BODY = "Consent required before collection, use or disclosure."  # full registry body
+VOTE_SUMMARY = "Consent is the lawful basis for processing."  # ensemble 1-2 sentence summary
+
 
 def _gold(source_id: str = "gdpr-1", **over: object) -> GoldPair:
     base: dict[str, object] = {
@@ -33,7 +38,7 @@ def _gold(source_id: str = "gdpr-1", **over: object) -> GoldPair:
         "target_jurisdiction": "sg",
         "target_framework": "pdpa_sg",
         "target_citation_id": "Section 13",
-        "target_mechanism": "Consent required before collection, use or disclosure.",
+        "target_mechanism": GOLD_BODY,
         "target_language": "en",
         "notes": "provisional M2 freeze — auto-promoted; NOT hand-validated",
     }
@@ -41,12 +46,18 @@ def _gold(source_id: str = "gdpr-1", **over: object) -> GoldPair:
     return GoldPair.model_validate(base)
 
 
-def _vote(citation_id: str, justification: str, model: str = "claude-haiku-4-5") -> ModelVote:
+def _vote(
+    citation_id: str,
+    justification: str,
+    *,
+    summary: str = VOTE_SUMMARY,
+    model: str = "claude-haiku-4-5",
+) -> ModelVote:
     return ModelVote(
         model=model,
         citation_id_raw=citation_id,
         citation_id_normalized=normalize_citation_id(citation_id),
-        target_mechanism="Consent is the lawful basis.",
+        target_mechanism=summary,
         mapping_justification=justification,
     )
 
@@ -79,32 +90,31 @@ class TestSourceIdOf:
 
 class TestBuildExample:
     def test_three_field_completion_is_valid_json(self) -> None:
-        ex = build_example(_gold(), justification="Both gate processing on consent.")
+        ex = build_example(_gold(), target_mechanism="A summary.", justification="Gate on consent.")
         assert isinstance(ex, TrainingExample)
-        roles = [m["role"] for m in ex.messages]
-        assert roles == ["system", "user", "assistant"]
+        assert [m["role"] for m in ex.messages] == ["system", "user", "assistant"]
 
         completion = json.loads(ex.messages[2]["content"])
         assert set(completion) == {"citation_id", "target_mechanism", "mapping_justification"}
-        assert completion["citation_id"] == "Section 13"
-        assert completion["target_mechanism"].startswith("Consent required")
-        assert completion["mapping_justification"] == "Both gate processing on consent."
+        assert completion["citation_id"] == "Section 13"  # authoritative gold citation
+        assert completion["target_mechanism"] == "A summary."  # passed-in, not gold body
+        assert completion["mapping_justification"] == "Gate on consent."
 
     def test_prompt_matches_eval_prompt(self) -> None:
         from daccord.eval.prompts import build_eval_prompt
 
         gold = _gold()
-        ex = build_example(gold, justification="x")
+        ex = build_example(gold, target_mechanism="m", justification="x")
         expected = build_eval_prompt(gold)
         assert ex.messages[0]["content"] == expected.system
         assert ex.messages[1]["content"] == expected.user
 
     def test_empty_justification_still_emits(self) -> None:
-        ex = build_example(_gold(), justification="")
+        ex = build_example(_gold(), target_mechanism="m", justification="")
         assert json.loads(ex.messages[2]["content"])["mapping_justification"] == ""
 
     def test_round_trip_model_dump_json(self) -> None:
-        ex = build_example(_gold(), justification="j")
+        ex = build_example(_gold(), target_mechanism="m", justification="j")
         reloaded = TrainingExample.model_validate_json(ex.model_dump_json())
         assert reloaded.messages == ex.messages
 
@@ -121,39 +131,47 @@ class TestBuildTrainingExamples:
     def _gold_set(self, pairs: list[GoldPair]) -> GoldSet:
         return GoldSet(pairs=pairs, dataset_hash="deadbeef", source_path="mem")
 
-    def test_justification_recovered_from_consensus_vote(self, tmp_path: Path) -> None:
+    def test_summary_and_justification_from_consensus_vote(self, tmp_path: Path) -> None:
         votes = [
-            _vote("Section 13", "Consensus seat reasoning."),
-            _vote("Section 99", "Dissenting seat reasoning.", model="gpt-5-mini"),
+            _vote("Section 13", "Consensus reasoning."),
+            _vote("Section 99", "Dissent.", model="gpt-5-mini"),
         ]
         index = self._index(tmp_path, [_tiered("gdpr-1", "Section 13", votes)])
         examples, stats = build_training_examples(self._gold_set([_gold("gdpr-1")]), index)
 
-        assert stats.justification_from_vote == 1
-        assert stats.justification_missing == 0
+        assert (stats.mechanism_from_vote, stats.mechanism_fallback) == (1, 0)
+        assert (stats.justification_from_vote, stats.justification_missing) == (1, 0)
         completion = json.loads(examples[0].messages[2]["content"])
-        assert completion["mapping_justification"] == "Consensus seat reasoning."
+        assert completion["target_mechanism"] == VOTE_SUMMARY  # summary, not gold body
+        assert completion["mapping_justification"] == "Consensus reasoning."
+        assert completion["citation_id"] == "Section 13"
 
-    def test_missing_tiered_match_emits_with_empty_justification(self, tmp_path: Path) -> None:
+    def test_missing_tiered_match_falls_back_to_gold_body(self, tmp_path: Path) -> None:
         index = self._index(tmp_path, [_tiered("gdpr-1", "Section 13", [_vote("Section 13", "j")])])
-        # gold-2 has no tiered row → missing, but still emitted
+        # gold-2 has no tiered row → mechanism falls back to gold body, justification empty
         examples, stats = build_training_examples(self._gold_set([_gold("gdpr-2")]), index)
 
         assert stats.emitted == 1
-        assert stats.justification_from_vote == 0
+        assert (stats.mechanism_from_vote, stats.mechanism_fallback) == (0, 1)
         assert stats.justification_missing == 1
-        assert json.loads(examples[0].messages[2]["content"])["mapping_justification"] == ""
+        completion = json.loads(examples[0].messages[2]["content"])
+        assert completion["target_mechanism"] == GOLD_BODY  # fallback
+        assert completion["mapping_justification"] == ""
 
-    def test_consensus_with_no_voting_seat_justification_is_missing(self, tmp_path: Path) -> None:
-        # consensus citation has no seat carrying a non-empty justification for it
-        votes = [_vote("Section 13", "")]
-        index = self._index(tmp_path, [_tiered("gdpr-1", "Section 13", votes)])
-        _, stats = build_training_examples(self._gold_set([_gold("gdpr-1")]), index)
+    def test_vote_without_summary_falls_back_to_gold_body(self, tmp_path: Path) -> None:
+        # consensus citation matches but the vote carries no summary / justification
+        empty_vote = _vote("Section 13", "", summary="")
+        index = self._index(tmp_path, [_tiered("gdpr-1", "Section 13", [empty_vote])])
+        examples, stats = build_training_examples(self._gold_set([_gold("gdpr-1")]), index)
+
+        assert (stats.mechanism_from_vote, stats.mechanism_fallback) == (0, 1)
         assert stats.justification_missing == 1
+        assert json.loads(examples[0].messages[2]["content"])["target_mechanism"] == GOLD_BODY
 
     def test_stats_total_accounting(self, tmp_path: Path) -> None:
         index = self._index(tmp_path, [_tiered("gdpr-1", "Section 13", [_vote("Section 13", "j")])])
         gold_set = self._gold_set([_gold("gdpr-1"), _gold("gdpr-2")])
         examples, stats = build_training_examples(gold_set, index)
         assert stats.input_rows == stats.emitted == len(examples) == 2
+        assert stats.mechanism_from_vote + stats.mechanism_fallback == 2
         assert stats.justification_from_vote + stats.justification_missing == 2

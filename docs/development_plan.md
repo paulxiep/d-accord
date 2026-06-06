@@ -1015,6 +1015,73 @@ docker compose run --rm root uv run python scripts/build_splits.py \
 # → train=717 val=69 test=141 = 927
 ```
 
+### 9.10 — Tiers 10–11 (training scaffold + small-run) — **M3 DONE (gate closed 2026-06-06)**
+
+**Tier 10A — `training/` sub-project.** New top-level self-contained env ([training/](../training/), own
+`pyproject.toml` + `uv.lock`, Python 3.14, CUDA image) so the heavy torch/peft/trl stack stays out of the shared
+`daccord` venv. Pins verified 2026-06-06: **trl 1.5.1 · datasets 4.8.5 · peft 0.19.1 · transformers 5.10.2 ·
+torch 2.12.0+cu130** (trl≥1.5 forces datasets≥4.7 — caught at first `uv sync`). [config.py](../training/config.py)
+holds every hyperparameter as one explicit `SmallRunConfig` (no YAML) + `for_oom_retry()`;
+[data.py](../training/data.py) is a torch-free loader + seeded subset; [train.py](../training/train.py) does
+4-bit NF4 load → `prepare_model_for_kbit_training` → all-linear `LoraConfig` → `trl SFTTrainer`. **MLflow via the
+HF callback (`report_to=["mlflow"]`) + the 1B `log_*` helpers — NOT global autolog** (autolog would dump the
+adapter to the artifact store; see [MLFLOW.md](MLFLOW.md)). `training` compose service sets
+`MLFLOW_TRACKING_URI=file:/workspace/mlruns` + `MLFLOW_ALLOW_FILE_STORE=true` (MLflow-3.x file-store opt-out).
+
+**Tier 10A — training-data build + the `target_mechanism` decision.**
+[scripts/build_training_data.py](../scripts/build_training_data.py) +
+[src/daccord/gold/training_data.py](../src/daccord/gold/training_data.py) project the frozen gold splits into
+chat SFT rows (`data/training/{split}.jsonl`). System+user come from `build_eval_prompt` (byte-identical to eval
+→ no train/eval prompt drift). **Decision: the assistant `target_mechanism` is the consensus vote's 1–2 sentence
+summary, not the `GoldPair` full registry clause body.** The eval prompt asks for a "one-to-two sentence
+summary", and the full bodies ran to **22,942 tokens max** (p50 1,483) — overflowing 16 GB VRAM. The
+authoritative full clause text stays in `data/clauses/` + the eval gold and is the source for the
+retrieval/verbatim serving path (`HybridRouter`, cloud) — not discarded, just not the fine-tune target. Build hit
+**100% summary + justification coverage** across all 1,002 rows; **raw tier-7 fingerprint verified unchanged**
+before/after (288 files, rollup `773781e7…`).
+
+**Tier 10B — frozen small-run config.** Qwen3-8B 4-bit NF4 (matches `LocalAdapterClient`); LoRA **all 7 linear
+projections** r16/α32/dropout 0.05; lr 2e-4 cosine, warmup 0.03; `paged_adamw_8bit`; gradient checkpointing
+(`use_reentrant=False`); bf16; 1 epoch; 200-pair seeded subset (eval = 50 of val).
+
+**Tier 11 — small-run results (M3 gate).** 200 × 1 epoch, **micro-batch 1 / grad-accum 16 / seq-4096**, ~10 min /
+13 steps. **Loss curve sensible**: train 1.306 → 0.862; eval_loss 0.967 → 0.963; token-acc 0.65 → 0.73. Adapter
+(87 MB safetensors) **reloads cleanly via `LocalAdapterClient`** and emits coherent mappings
+(`training/runs/qlora-small-run-200/sanity.jsonl`). MLflow run carries
+`run_name·git_commit·seed·dataset_hash·adapter_sha256`, with adapter_sha256 **verified == the on-disk file**.
+
+**R5 played out as a *silent sysmem spill*, not a clean OOM.** On the 16 GB Windows/WSL RTX 5080, seq-4096 ×
+micro-batch 2 (the 10B default) overflowed VRAM and the NVIDIA driver **fell back to shared system memory over
+PCIe** — no `CUDA out of memory`, just a crawl (step 1 never finished in 240 s). **The dev-plan OOM ladder's
+exception trigger is therefore wrong for this platform: watch step-time / shared-GPU-memory, not a CUDA OOM.**
+Fix that worked: micro-batch 1 **and** the summary-target data (removing the 22 K-token outliers). Also fixed:
+`per_device_eval_batch_size` (TrainingArguments default 8) tied to the train micro-batch — at these lengths the
+eval step alone would spill.
+
+**Qwen3 `<think>` parser fix (M4-blocking, caught by the M3 sanity pass).** Qwen3 emits an (often empty)
+`<think>...</think>` block before its JSON, making `_parse_candidate`
+([src/daccord/eval/clients.py](../src/daccord/eval/clients.py)) fail at char 0 — every sanity row was a
+parse_error despite correct content. `_parse_candidate` now strips `<think>` blocks (+ falls back to the first
+`{...}` for code-fence/prose), so M4 won't score every fine-tune row as a Tier-1 miss. Covered by
+`tests/test_parse_candidate.py`.
+
+**Data architecture (load-bearing-ancestor rule).** `data/training/` (4.1 MB) is **committed** — the smallest
+artifact carrying the ensemble summaries (its 84 MB upstream `tiered/` is gitignored + ~$32 to rebuild) and it
+version-controls the MLflow `dataset_hash`. `data/clauses/` + `data/indices/` are now **gitignored** (cheaply
+regenerable from committed `ingest/`+`registry/`; commands in [data/README.md](../data/README.md)).
+
+**Verification (all green):**
+
+```
+docker compose run --rm root uv run pytest          # incl. test_training_data + test_parse_candidate
+docker compose run --rm root uv run ruff check . && uv run pyright
+docker compose run --rm training uv run pytest       # config / data / trainer-config (15)
+docker compose run --rm root uv run python scripts/build_training_data.py
+# → train 773 / val 79 / test 150, summary-target + justification coverage 100%
+docker compose run --rm training uv run python train.py --per-device-batch-size 1 --grad-accum 16
+# → 13/13 steps ~10 min; adapter_sha256 logged == file; sanity.jsonl parseable
+```
+
 ---
 
 ## Critical files
@@ -1022,6 +1089,6 @@ docker compose run --rm root uv run python scripts/build_splits.py \
 - Internal architecture plan (gitignored) — authoritative architecture (Pillar B SageMaker hosting)
 - [README.md](../README.md) — parser-bakeoff rationale + eval results updates land here after M4
 - `eval/run_eval.py` (to be created — the M0 eval harness is the project's first hard gate)
-- `training/train.py` (to be created — HF `transformers` + `peft` + `bitsandbytes` + `trl` stack; small-sweep first at M3)
+- [training/train.py](../training/train.py) — HF `transformers`+`peft`+`bitsandbytes`+`trl` QLoRA trainer; **landed at M3** (small-run validated 2026-06-06, §9.10)
 - `scripts/teardown_endpoint.py` (to be created — committed before Phase 2 first stand-up)
 - `scripts/deploy_endpoint.py` (to be created — Phase 2 re-stand-up on demand)

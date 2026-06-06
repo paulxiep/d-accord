@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -90,17 +91,53 @@ def _estimate_tokens(messages: PromptMessages) -> int:
     return (len(messages.system) + len(messages.user)) // _CHARS_PER_TOKEN
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_reasoning(raw_text: str) -> str:
+    """Remove `<think>...</think>` reasoning blocks before JSON parsing.
+
+    Qwen3 (and other hybrid-reasoning models) emit a think block — often empty
+    — *before* the JSON answer, which makes a naive `json.loads` fail at char 0
+    even though the JSON that follows is valid. This is the fine-tune's own
+    output path (LocalAdapterClient reuses this parser), so stripping here keeps
+    the M4 eval from scoring every fine-tune row as a parse error.
+    """
+    return _THINK_BLOCK.sub("", raw_text).strip()
+
+
+def _extract_json_object(text: str) -> str | None:
+    """The first `{...}` slice of `text` (span between the first `{` and last
+    `}`), or None. Recovers JSON wrapped in ```code fences``` or stray prose."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return text[start : end + 1]
+
+
 def _parse_candidate(raw_text: str) -> tuple[CitationCandidate | None, str | None]:
     """Parse a model's JSON output into a `CitationCandidate`.
 
     Returns `(candidate, None)` on success; `(None, error_msg)` on any
     JSON or schema failure. The runner records parse failures as Tier-1
     misses with the error surfaced in the CSV's judge_reasoning column.
+
+    Reasoning scaffolding (`<think>...</think>`) is stripped first; if the
+    cleaned text still isn't bare JSON, we retry on the first `{...}` object so
+    a code-fence or prose preamble doesn't fail an otherwise-valid answer.
     """
+    text = _strip_reasoning(raw_text)
     try:
-        payload = json.loads(raw_text)
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        return None, f"json decode at char {exc.pos}: {exc.msg}"
+        snippet = _extract_json_object(text)
+        if snippet is None:
+            return None, f"json decode at char {exc.pos}: {exc.msg}"
+        try:
+            payload = json.loads(snippet)
+        except json.JSONDecodeError as exc2:
+            return None, f"json decode at char {exc2.pos}: {exc2.msg}"
     if not isinstance(payload, dict):
         return None, f"expected JSON object, got {type(payload).__name__}"
     try:

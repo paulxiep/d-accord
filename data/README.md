@@ -1,27 +1,62 @@
 # `data/` — pipeline stages & data map
 
-The pipeline writes through these subdirectories in sequence. Only **committed** dirs are tracked in
-git (`data/gold/`); everything else is produced locally and reproducible from the lockfile + scripts.
-The committed-vs-ignored split is enforced by [.gitignore](../.gitignore) — the hand-validated/frozen
-gold set + its dataset hash is the durable artifact; everything upstream can be regenerated.
+The pipeline writes through these subdirectories in sequence. The committed-vs-ignored split
+([.gitignore](../.gitignore)) follows one rule: **commit the smallest load-bearing ancestor on each
+derivation path — the smallest artifact that still captures information you can't cheaply or freely
+regenerate — then gitignore everything above it (huge/expensive, already captured by the cut) and
+everything below it (cheaply rebuildable from the cut).**
+
+Committed cut-points: `ingest/` (parsing distillate of the source PDFs — re-parsing needs Marker+GPU),
+`registry/` (citation universe; needed to rebuild `clauses/`), and `gold/` + `training/` (the small
+distillates of the ~$32 ensemble run). Gitignored: cheaply rebuilt *below* the cut (`clauses/`,
+`indices/`), or huge/expensive *above* it but already captured by gold+training (`raw/`, `ensemble/`,
+`splits/`). `training/` in particular is committed because its summaries live only in 84 MB `tiered/`
+(gitignored) — it is itself the smallest artifact carrying them, and version-controls the MLflow
+`dataset_hash`.
 
 ## Top-level stages
 
 | Dir | Committed? | Holds | Schema | Produced by |
 |---|---|---|---|---|
 | `raw/` | no | Source PDFs | — | tier 1D (download) |
-| `ingest/` | no | Parsed markdown + `manifest.jsonl` | — | tier 4 (Marker / Thai parser) |
-| `registry/{fw}.json` | no | Per-framework **valid citation IDs** | `FrameworkRegistry` | tier 5 (`scripts/extract_registry.py`) |
+| `ingest/` | **yes** | Parsed markdown + `manifest.jsonl` | — | tier 4 (Marker / Thai parser) |
+| `registry/{fw}.json` | **yes** | Per-framework **valid citation IDs** | `FrameworkRegistry` | tier 5 (`scripts/extract_registry.py`) |
 | `clauses/{fw}.json` | no | Per-framework **citation_id → body text** | `FrameworkClauses` | tier 7A prep (`scripts/extract_clauses.py`) |
 | `indices/target_clauses/{fw}.{faiss,jsonl}` | no | FAISS vectors + metadata for the RAG seat | — | tier 6B++ (`envs/eval/scripts/build_target_indices.py`) |
 | `ensemble/` | no | Candidate generation → tiering → cross-check → verdicts | see below | tiers 7A / 6B / 6B+ / 7C |
 | `splits/` | no | Gold-eligible rows partitioned train/val/test (still `TieredPair`) | `TieredPair` | tier 7B (`scripts/build_splits.py`) |
 | `gold/` | **yes** | Frozen gold pairs + dataset SHA | `GoldPair` | tier 9 (`scripts/freeze_gold.py`) |
+| `training/{train,val,test}.jsonl` | **yes** | SFT chat examples — 1-2 sentence **summary** target | `TrainingExample` (`messages[]`) | tier 10A (`scripts/build_training_data.py`) |
 
 Schemas live in `src/daccord/`: registry/clauses → [`registry/schema.py`](../src/daccord/registry/schema.py);
 ensemble shapes → [`ensemble/schema.py`](../src/daccord/ensemble/schema.py),
 [`ensemble/bidirectional.py`](../src/daccord/ensemble/bidirectional.py),
 [`ensemble/validated.py`](../src/daccord/ensemble/validated.py); gold → [`gold/schema.py`](../src/daccord/gold/schema.py).
+
+## Regenerating the gitignored derivatives
+
+A fresh clone has the committed cut-points (`ingest/`, `registry/`, `gold/`, `training/`) but **not**
+`clauses/` or `indices/`. They're byte-deterministic from committed inputs — rebuild them locally
+(both CPU-only, no GPU, fast):
+
+```bash
+# clauses/{fw}.json  ← data/registry/ + data/ingest/   (byte-identical re-runs)
+docker compose run --rm root uv run python scripts/extract_clauses.py
+
+# indices/target_clauses/{fw}.{faiss,jsonl}  ← data/clauses/
+docker compose run --rm eval uv run python scripts/build_target_indices.py
+```
+
+The expensive upstream — `ensemble/{raw,tiered}/` (144 MB + 84 MB) and `splits/` — is gitignored and
+**not** freely reproducible: it requires the paid ensemble run (`run_ensemble.py run-paid`, ~$32 +
+~6.5 h). You almost never need it: committed `gold/` + `training/` are the durable distillates. Only
+rebuild the ensemble if you're re-deriving the gold set itself. If you do re-run it, regenerate the
+trainer input afterward (and re-commit `training/`):
+
+```bash
+# training/{split}.jsonl  ← data/gold/ + data/ensemble/tiered/  (needs tiered present locally)
+docker compose run --rm root uv run python scripts/build_training_data.py
+```
 
 ## The `ensemble/` subtree (the part that's easy to get lost in)
 
