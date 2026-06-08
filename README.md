@@ -38,10 +38,10 @@ D'accord ("agreed" in French) is a small specialized language model fine-tuned t
 | `data/ensemble/tiered/` | HIGH/MEDIUM/LOW/SALVAGE classification (deterministic via registry agreement) + bidirectional reverse-direction cross-check |
 | `data/gold/` | Frozen mapping pairs (`gold_v1.jsonl`, 1,002) — committed. **Provisional: auto-promoted, zero hand-validation** |
 | `training/` | QLoRA training (Qwen3-8B base, 4-bit NF4, all-linear LoRA) — MLflow-tracked via `report_to=["mlflow"]`; 1–2 sentence summary target (full clause body served via retrieval) |
-| `eval/` | Three-tier scoring (citation exact match + LLM-as-judge semantic + ~100-example human spot-check) across four comparators including a retrieval baseline; stratified by in-domain vs out-of-domain ([eval/README.md](eval/README.md)) |
-| `publish/` | S3 packaging in SageMaker-compatible layout — bundles QLoRA adapter + retrieval index + embedder snapshot + custom inference handler |
-| `src/daccord/serving/` | `HybridRouter` (retrieval-first, QLoRA fallback, per-response provenance tagging) shared between local demo and SageMaker handler |
-| `consumer/` | Side-by-side comparison + CSV export (Streamlit), backed by hybrid retrieval+fine-tune SageMaker endpoint with per-response provenance tagging |
+| `eval/` | Three-tier scoring (citation exact match + LLM-as-judge semantic + ~100-example human spot-check) across six comparators including a retrieval baseline; stratified by in-domain vs out-of-domain ([eval/README.md](eval/README.md)) |
+| `publish/` | Model-packaging + cloud inference handler — **deferred to a future phase** (only needed if live generation on out-of-corpus clauses is added; v0 needs no cloud hosting) |
+| `src/daccord/serving/` | `HybridRouter` (retrieval-first, QLoRA fallback, per-response provenance tagging) — runs at **precompute time** to generate the static demo's saved outputs; the same router would back any future live endpoint |
+| `consumer/` | Side-by-side comparison + CSV export. **A static, no-backend interactive demo** (`consumer/demo/`) over precomputed model outputs — select any corpus clause, compare columns, filter, export CSV, all client-side; self-hostable anywhere (no streamlit.io, no server, no GPU). The source-clause space is closed (every clause is a corpus citation), so everything is precomputable; optional free-text input is a RAG hop (embed → FAISS nearest clause → precomputed mapping), needing only a free/cheap embedder, not a GPU endpoint |
 
 ## Methodology
 
@@ -56,7 +56,7 @@ D'accord ("agreed" in French) is a small specialized language model fine-tuned t
 
 **Eval** — three-tier scoring across four comparator models:
 - **Tier 1 — Citation exact match**: deterministic, cheap; top-1 and top-3.
-- **Tier 2 — LLM-as-judge semantic match**: Llama 4 Scout via Groq free tier scores substance match, mitigating exact-match penalty for valid paraphrasings.
+- **Tier 2 — LLM-as-judge semantic match**: scores substance match, mitigating the exact-match penalty for valid paraphrasings. The M4 judge is **Claude Haiku 4.5 via the direct Anthropic API**, deliberately chosen from outside the comparator pool to avoid self-judging bias (the M0 baseline used a Groq judge).
 - **Tier 3 — Human spot-check** (~100 examples): quantifies judge accuracy; calibrates Tier 2 scores.
 
 **Comparators**: fine-tuned d'accord vs base Qwen 3-8B vs Llama 4 Scout (Groq) vs Qwen 3-32B (Groq) vs Gemini 3.1 Flash Lite (Google AI Studio) vs **retrieval baseline** (sentence-transformers MPNet + FAISS over train-split source clauses). The retrieval baseline answers the architectural question "could you have just done retrieval?" with data. The Qwen-3-32B comparator additionally asks "would the newer-and-bigger same-family model already beat us without fine-tune?".
@@ -67,7 +67,7 @@ Per-jurisdiction + per-language breakdowns are aggregated from CSV rows at read 
 
 ## Current State
 
-Phase 1 (local validation) in progress. Phase 2 (SageMaker hosting) triggered separately when M4 lands a publishable delta. See [development plan](docs/development_plan.md) for the milestone gate definitions + cut criteria; the table below is the live status.
+Phase 1 (local validation) in progress. Phase 2 (optional, provider-agnostic cloud hosting) triggered separately when M4 lands a publishable delta and a live demo is actually needed. See [development plan](docs/development_plan.md) for the milestone gate definitions + cut criteria; the table below is the live status.
 
 ### Phase 1 — Local validation
 
@@ -93,17 +93,17 @@ Phase 1 (local validation) in progress. Phase 2 (SageMaker hosting) triggered se
   - ✓ Small-run 200 × 1 epoch, ~10 min — train loss 1.306→0.862, eval_loss 0.967→0.963; adapter (87 MB) reloads via `LocalAdapterClient` + emits coherent mappings; MLflow logs git_commit·seed·dataset_hash·adapter_sha256 (sha verified == on-disk file).
   - **Training target = ensemble 1–2 sentence summary** (the full clause body is served via the retrieval path instead) — aligns train with the eval prompt and keeps sequences within 16 GB VRAM.
   - **R5 finding**: on 16 GB Windows/WSL the 5080 *silently spills* to system RAM at seq-4096 × micro-batch 2 (NVIDIA sysmem fallback — no clean CUDA OOM, just a crawl); watch step-time/shared-memory, not an exception. Resolved at micro-batch 1 + the summary target. Qwen3 `<think>`-block parser fix also landed (else M4 would score every fine-tune row as a parse error).
-- **M4 — Eval delta proven (Phase 1 done)** ⏳ — blocked on M3. Three-tier eval × 4 comparators × 2 slices (in-domain + out-of-domain) per-jurisdiction breakdown.
+- **M4 — Eval delta proven (Phase 1 done)** ⏳ — next gate (M3 closed). Three-tier eval × **6 comparators** × 2 slices (in-domain + out-of-domain) per-jurisdiction breakdown; judge = Claude Haiku 4.5 via direct Anthropic API. Tier-12 implementation steps in [docs/tier12_plan.md](docs/tier12_plan.md).
 
-### Phase 2 — SageMaker hosting
+### Phase 2 — cloud GPU hosting (deferred to future scope)
 
-- **M5 — Endpoint live, captured, torn down** ⏳ — triggered separately when M4 has a publishable delta + a concrete demo opportunity. Target spend <$100; demo recording is the durable artifact, not the running endpoint.
+- **M5 — Demo captured (no live endpoint needed)** ⏳ — the source-clause space is **closed** (every clause is a corpus citation), so the precomputed static demo covers the entire MVP, including free-text input via a RAG hop (embed → FAISS nearest clause → precomputed mapping, free/cheap embedder, no GPU). A live GPU endpoint is therefore **unnecessary for v0** — it only earns its cost for clauses outside the 9-framework corpus (future frameworks). If ever wanted, it deploys behind the cloud-agnostic `HybridRouter` to a scale-to-zero provider (**HF Endpoints / Modal**; SageMaker faces the same AWS approval wall as Bedrock and is not pre-warmed). The durable artifact is the recording, not a running endpoint.
 
 ### Cross-milestone infrastructure (in place since 2026-05-25)
 
 - **Dev environment**: Docker Compose, 7 services (`root`, `eval`, `audit`, `bakeoff`, `baseline`, `ingest`, `consumer`); shared uv wheel cache + HF model cache + surya datalab cache via named volumes; per-env Python split (3.13 for marker-pdf-using `bakeoff` + `ingest`; 3.14 elsewhere).
 - **Cost discipline**: per-provider RPD caps (Groq 14400 / Gemini 1500 / Cerebras 1000 / DeepSeek 1000) wired into the cost layer; shared 10-RPM throttle, Gemini transient-error retry, Groq APIError safety net in all clients; eval runner uses pair-major iteration so per-provider density stays well under any single provider's free-tier cap.
-- **Hybrid serving**: `HybridRouter` (retrieval-first + QLoRA fallback, per-response provenance tagging) shared between the local Streamlit demo and the SageMaker custom-inference handler.
+- **Hybrid serving**: `HybridRouter` (retrieval-first + QLoRA fallback, per-response provenance tagging) shared between the demo-data precompute step and the optional cloud inference handler.
 
 ## Development environment
 
@@ -126,12 +126,12 @@ Per-env Python split: root/eval/audit/baseline/consumer on 3.14; bakeoff on 3.13
 - **Training**: QLoRA via PEFT
 - **MLOps tracking**: MLflow
 - **PDF processing**: Marker (locked for both EN and TH after a 5-page Thai bake-off vs Typhoon-OCR — both hit perfect citation extraction; Marker preferred for ~2× faster wall time and noise-free body output free of Royal Gazette page-header chrome)
-- **Ensemble labelers**: four open-weight models via free-tier APIs — Llama 4 Scout (Groq), Qwen 3-32B (Groq / Cerebras), Gemini 3.1 Flash Lite (Google AI Studio), DeepSeek V3
-- **Eval judge**: Llama 4 Scout via Groq free tier (bumped from Llama 3.3-70B on 2026-05-25 for stronger judging signal; self-judging-bias note in the M0 baseline CSV when `groq` is in the generator pool)
+- **Ensemble labelers**: four paid-API seats, one per family — Claude Haiku 4.5 (Anthropic), GPT-5-mini (OpenAI), Gemini 3.1 Flash Lite (Google), Qwen 3-235B-A22B via Together (Alibaba) — plus a 5th CPU **RAG seat** (MPNet + FAISS). This is the Path-2 lineup actually run for M2 (the Bedrock-only Path-1 lineup was preserved in code but AWS denied the Bedrock quota)
+- **Eval judge (M4)**: **Claude Haiku 4.5 via the direct Anthropic API** — kept outside the comparator pool to avoid self-judging bias (Bedrock was the original judge route but its quota was unavailable; the free-tier Groq route is a comparator, so it isn't used as judge). M0 baseline used a Groq judge with a documented self-judging-bias note
 - **Retrieval baseline**: `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` + `faiss-cpu` (FAISS index over train-split source clauses; also reused at serving time by the hybrid router)
-- **Hybrid serving**: `HybridRouter` (retrieval-first, QLoRA fallback, per-response provenance tagging) — shared between the local Streamlit demo and the SageMaker custom inference handler
-- **Demo consumer**: Streamlit side-by-side comparison UI with CSV export
-- **Deployment**: boto3-direct to SageMaker real-time endpoint (`ml.g5.xlarge`)
+- **Hybrid serving**: `HybridRouter` (retrieval-first, QLoRA fallback, per-response provenance tagging) — shared between the demo-data precompute step and the optional cloud inference handler
+- **Demo consumer**: static, no-backend interactive side-by-side comparison UI (client-side, over precomputed outputs) with CSV export — self-hosted, no server cost
+- **Deployment**: precomputed static demo — no live endpoint, no GPU, self-hosted anywhere. Cloud GPU hosting (HF Endpoints / Modal / SageMaker behind `HybridRouter`) is **deferred to a future phase**, justified only by out-of-corpus generation
 
 ## Roadmap
 
@@ -151,14 +151,14 @@ Per-env Python split: root/eval/audit/baseline/consumer on 3.14; bakeoff on 3.13
 | **5 (M1)** | 2026-05-26 | Per-framework citation-registry extraction — 9/9 frameworks, 100% toy-gold base-section recall, idempotent reruns; closes M1 |
 | **6–9 (M2)** | 2026-06-05 | Path-2 paid ensemble + RAG seat (35,552 candidates) → tiering + bidirectional → **provisional gold freeze 1,002 pairs (zero hand-val)** + jurisdiction-disjoint splits + dataset SHA |
 | **10–11 (M3)** | 2026-06-06 | `training/` QLoRA sub-project + summary-target build; small-run (200×1ep) validated — loss curve sane, adapter saves/reloads, MLflow SHA-linked; R5 sysmem-spill + Qwen3 `<think>` parser fixes |
-| **12–13 (M4)** | TBD | Full QLoRA train + three-tier eval × 4 comparators × 2 slices — Phase 1 done |
-| **14–18 (M5)** | TBD (Phase 2) | SageMaker endpoint stand-up via boto3 + smoke test + capture + teardown |
+| **12–13 (M4)** | TBD | Full QLoRA train (small sweep) + three-tier eval × 6 comparators × 2 slices (judge: Claude Haiku 4.5 direct) — Phase 1 done. See [tier 12 plan](docs/tier12_plan.md) |
+| **14–18 (M5)** | TBD (Phase 2, deferred) | Precomputed static demo capture (no endpoint, no GPU). Live cloud GPU endpoint deferred to future scope (only needed for out-of-corpus clauses) |
 
 ### Release targets
 
 | Version | Date | Focus |
 |---|---|---|
-| **v0 MVP** | 2026 Q2 | Privacy: SEA-4 + EU(spine+UK+DE+FR); QLoRA fine-tune on Qwen3-8B; three-tier eval (citation exact match + LLM-as-judge + human spot-check) with retrieval baseline + in/out-of-domain stratification; hybrid serving (retrieval + fine-tune fallback with provenance tagging); Streamlit side-by-side comparison + CSV export |
+| **v0 MVP** | 2026 Q2 | Privacy: SEA-4 + EU(spine+UK+DE+FR); QLoRA fine-tune on Qwen3-8B; three-tier eval (citation exact match + LLM-as-judge + human spot-check) with retrieval baseline + in/out-of-domain stratification; hybrid serving (retrieval + fine-tune fallback with provenance tagging); static, no-backend interactive side-by-side comparison + CSV export |
 | **v1** | TBD | Operational-resilience extension: MAS TRM, BOT IT, OJK POJK, BNM RMiT, BSP, DORA, EBA, PRA SS1/21, BaFin BAIT/MaRisk |
 | **v2+** | TBD | Additional legal domains (employment, AML/KYC, consumer protection) and additional jurisdictions |
 
@@ -178,4 +178,4 @@ Per-env Python split: root/eval/audit/baseline/consumer on 3.14; bakeoff on 3.13
 - **ML & MLOps**: `QLoRA Fine-Tuning` · `PEFT` · `MLflow` · `LoRA Adapter` · `Multi-Model Ensemble Labeling` · `Weak Supervision` · `Chain-of-Thought Structured Output` · `Citation Registry Constraint` · `Three-Tier Evaluation` · `LLM-as-Judge` · `Human Spot-Check Calibration`
 - **Base / Ensemble Models**: `Qwen3-8B (base)` · `Qwen3-32B` · `Llama 4 Scout (17B × 16E MoE)` · `Gemini 3.1 Flash Lite` · `DeepSeek V3` (all open-weight; free-tier-served)
 - **PDF / Layout**: `Marker (ViT layout, locked for EN + TH)` · `LlamaParse (fallback)` · `Citation Registry Extraction`
-- **Deployment**: `AWS SageMaker (endpoint hosting via boto3, custom inference handler w/ HybridRouter)` · `Streamlit side-by-side comparison + CSV export UI`
+- **Deployment**: `Static no-backend interactive demo (precomputed, self-hosted)` · `Cloud GPU hosting deferred to a future phase (HF Endpoints / Modal / SageMaker behind HybridRouter)`
